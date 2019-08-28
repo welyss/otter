@@ -38,6 +38,7 @@ import com.alibaba.otter.shared.common.model.config.data.db.DbMediaSource;
 import com.alibaba.otter.shared.etl.model.EventColumn;
 import com.alibaba.otter.shared.etl.model.EventData;
 import com.alibaba.otter.shared.etl.model.EventType;
+import com.google.common.collect.ComputationException;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
 
@@ -74,7 +75,7 @@ public class RowDataTransformer extends AbstractOtterTransformer<EventData, Even
                 // 是否需要对ddl sql进行转化，暂时不支持异构，必须保证源表和目标表的名字相同
                 result.setDdlSchemaName(data.getDdlSchemaName());
                 result.setSql(data.getSql());
-                return result;
+//                return result;
             } else {
                 // 动态转换ddl sql,替换库名和表名
                 String sql = DdlUtils.convert(data.getSql(),
@@ -84,13 +85,20 @@ public class RowDataTransformer extends AbstractOtterTransformer<EventData, Even
                     result.getTableName());
                 result.setDdlSchemaName(result.getSchemaName());
                 result.setSql(sql);
-                return result;
+//                return result;
                 // throw new TransformException("no support ddl for [" +
                 // data.getSchemaName() + "." + data.getTableName()
                 // + "] to [" + result.getSchemaName() + "." +
                 // result.getTableName()
                 // + "] , sql :" + data.getSql());
             }
+        	if (data.getEventType().isCreate()) {
+        		DataMediaPair dataMediaPair = context.getDataMediaPair();
+                DbDialect dbDialect = dbDialectFactory.getDbDialect(dataMediaPair.getPipelineId(),
+                        (DbMediaSource) dataMedia.getSource());
+            	dbDialect.cacheCreateDDL(result.getDdlSchemaName(), result.getTableName(), result.getSql());
+        	}
+        	return result;
         }
 
         Multimap<String, String> translateColumnNames = HashMultimap.create();
@@ -111,7 +119,7 @@ public class RowDataTransformer extends AbstractOtterTransformer<EventData, Even
             DbDialect dbDialect = dbDialectFactory.getDbDialect(dataMediaPair.getPipelineId(),
                 (DbMediaSource) dataMedia.getSource());
 
-            Table table = dbDialect.findTable(result.getSchemaName(), result.getTableName());
+            Table table = findTableRetry(dbDialect, result.getSchemaName(), result.getTableName(), 3);
             tableHolder = new TableInfoHolder(table, useTableTransform, enableCompatibleMissColumn);
         }
 
@@ -131,6 +139,31 @@ public class RowDataTransformer extends AbstractOtterTransformer<EventData, Even
 
         result.setColumns(otherColumns);
         return result;
+    }
+
+    /**
+     * 1. 表元数据回查时,如果该表时临时表在回查位置已被删除,导致回查失败使任务中断,解决思路是抓到建表语句解析后生成元数据放入cache。
+     * 2. 由于SETL中ET是异步的,导致dml会在建表语句之前先被处理,此时回查仍然失败,思路是尝试重试以等建表ddl加载cache.
+     * @param dbDialect
+     * @param schema
+     * @param table
+     * @param retryCount
+     * @return
+     */
+    private Table findTableRetry(DbDialect dbDialect, String schema, String table, int retryCount) {
+    	try {
+    		return dbDialect.findTable(schema, table);
+    	} catch(ComputationException e) {
+        	if (e.getMessage().matches(".*no found table.*") || e.getMessage().matches(".*find table.*")) {
+        		try {
+					Thread.sleep(5 * 1000);
+				} catch (InterruptedException eie) {
+				}
+        		return findTableRetry(dbDialect, schema, table, --retryCount);
+        	} else {
+        		throw e;
+        	}
+        }
     }
 
     /**

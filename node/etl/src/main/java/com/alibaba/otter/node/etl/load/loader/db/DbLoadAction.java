@@ -364,14 +364,19 @@ public class DbLoadAction implements InitializingBean, DisposableBean {
                             // data.getDdlSchemaName());
 
                             // 解决当数据库名称为关键字如"Order"的时候,会报错,无法同步
-                            result &= stmt.execute("use `" + data.getDdlSchemaName() + "`");
+//                            result &= stmt.execute("use `" + data.getDdlSchemaName() + "`");
+                            stmt.execute("use `" + data.getDdlSchemaName() + "`");
                         }
-                        result &= stmt.execute(data.getSql());
+//                        result &= stmt.execute(data.getSql());
+                        stmt.execute(data.getSql());
                         return result;
                     }
                 });
                 if (result) {
                     context.getProcessedDatas().add(data); // 记录为成功处理的sql
+                    if (data.getEventType().isCreate()) {
+                    	dbDialect.cacheCreateDDL(data.getDdlSchemaName(), data.getTableName(), data.getSql());
+                    }
                 } else {
                     context.getFailedDatas().add(data);
                 }

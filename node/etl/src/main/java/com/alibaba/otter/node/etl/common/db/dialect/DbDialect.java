@@ -68,4 +68,6 @@ public interface DbDialect {
     public void reloadTable(String schema, String table);
 
     public void destory();
+
+    public void cacheCreateDDL(String schema, String table, String ddl);
 }

@@ -63,6 +63,7 @@ import com.alibaba.otter.shared.etl.model.DbBatch;
 import com.alibaba.otter.shared.etl.model.EventColumn;
 import com.alibaba.otter.shared.etl.model.EventColumnIndexComparable;
 import com.alibaba.otter.shared.etl.model.EventData;
+import com.google.common.collect.ComputationException;
 
 /**
  * 基于数据库的反查 , 使用多线程技术进行加速处理 {@linkplain DatabaseExtractWorker}
@@ -108,6 +109,12 @@ public class DatabaseExtractor extends AbstractExtractor<DbBatch> implements Ini
         List<EventData> eventDatas = dbBatch.getRowBatch().getDatas();
         for (EventData eventData : eventDatas) {
             if (eventData.getEventType().isDdl()) {
+        		if (eventData.getEventType().isCreate()) {
+        			if (pipeline != null) {
+        				DbDialect dbDialect = dbDialectFactory.getDbDialect(pipeline.getId(), (DbMediaSource) ConfigHelper.findDataMedia(pipeline, eventData.getTableId()).getSource());
+        				dbDialect.cacheCreateDDL(eventData.getDdlSchemaName(), eventData.getTableName(), eventData.getSql());
+        			}
+        		}
                 continue;
             }
 
@@ -189,11 +196,36 @@ public class DatabaseExtractor extends AbstractExtractor<DbBatch> implements Ini
         // 获取数据表信息
         DataMedia dataMedia = ConfigHelper.findDataMedia(pipeline, eventData.getTableId());
         DbDialect dbDialect = dbDialectFactory.getDbDialect(pipeline.getId(), (DbMediaSource) dataMedia.getSource());
-        Table table = dbDialect.findTable(eventData.getSchemaName(), eventData.getTableName());
-        if (table.getColumnCount() == eventData.getColumns().size() + eventData.getKeys().size()) {
-            return false;
-        } else {
-            return true;
+    	Table table = findTableRetry(dbDialect, eventData.getSchemaName(), eventData.getTableName(), 3);
+    	if (table.getColumnCount() == eventData.getColumns().size() + eventData.getKeys().size()) {
+    		return false;
+    	} else {
+    		return true;
+    	}
+    }
+
+    /**
+     * 1. 表元数据回查时,如果该表时临时表在回查位置已被删除,导致回查失败使任务中断,解决思路是抓到建表语句解析后生成元数据放入cache。
+     * 2. 由于SETL中ET是异步的,导致dml会在建表语句之前先被处理,此时回查仍然失败,思路是尝试重试以等建表ddl加载cache.
+     * @param dbDialect
+     * @param schema
+     * @param table
+     * @param retryCount
+     * @return
+     */
+    private Table findTableRetry(DbDialect dbDialect, String schema, String table, int retryCount) {
+    	try {
+    		return dbDialect.findTable(schema, table);
+    	} catch(ComputationException e) {
+        	if (e.getMessage().matches(".*no found table.*") || e.getMessage().matches(".*find table.*")) {
+        		try {
+					Thread.sleep(5 * 1000);
+				} catch (InterruptedException eie) {
+				}
+        		return findTableRetry(dbDialect, schema, table, --retryCount);
+        	} else {
+        		throw e;
+        	}
         }
     }
 
